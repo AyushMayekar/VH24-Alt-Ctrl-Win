@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, OAuth2AuthorizationCodeBearer
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from datetime import timedelta, datetime
 from starlette.requests import Request
@@ -10,13 +11,25 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pymongo import MongoClient, UpdateOne
 from pydantic import BaseModel, EmailStr, Field
-import os, requests 
+import os, requests
 from dotenv import load_dotenv
 import re
 
 load_dotenv()
 
+# FastAPI app instance
+app = FastAPI()
 
+# Configure CORS settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"],  
+)
+
+# Prerequisit
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_DURATION = timedelta(minutes=15)
 client_id = os.getenv('GOOGLE_CLIENT_ID')
@@ -29,9 +42,6 @@ client = MongoClient(MONGO_URI)
 db = client[os.getenv('client')]
 users_collection = db[os.getenv('users_collection')]
 
-
-# FastAPI app instance
-app = FastAPI()
 
 # Password encryption setup
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -82,7 +92,6 @@ async def google_callback(request: Request, code: str):
     try:
         # Verify the ID token
         id_info = id_token.verify_oauth2_token(id_token_val, google_requests.Request(), client_id)
-        google_id = id_info["sub"]
         email = id_info["email"]
 
         # Check if the user exists in the MongoDB database
@@ -96,7 +105,8 @@ async def google_callback(request: Request, code: str):
             access_token = create_access_token(
                 data={"email": email}, expires_delta=access_token_expires
             )
-        return {"message": "Success", "access": access_token}
+        return RedirectResponse(url='http://127.0.0.1:5500/Modern-Login-master/acess.html')
+    
 
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID token")
@@ -122,7 +132,7 @@ class TokenData(BaseModel):
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-
+# creating jwt
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
     if expires_delta:
@@ -133,6 +143,7 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=Algo)  # Create the JWT
     return encoded_jwt
 
+# getting user info from db
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -155,9 +166,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
+# if the email already exists
 def is_email_in_use(email: str):
     return users_collection.find_one({"email": email}) is not None
 
+# register logic
 @app.post("/register/")
 async def register_user(user: UserRegister):
     # 1. Check if the two passwords match
@@ -182,7 +195,8 @@ async def register_user(user: UserRegister):
         "hashed_password": hashed_password,
         "lockout_time": None,
         "is_locked": False,
-        "failed_attempts": 0
+        "failed_attempts": 0,
+        "admin": False
     }
     users_collection.insert_one(user_data)
 
@@ -190,6 +204,7 @@ async def register_user(user: UserRegister):
     return {"message": "User registered successfully!"}
 
 
+# login logic
 @app.post("/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = users_collection.find_one({"email": form_data.username})  # Find user by email
@@ -232,7 +247,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     )
     return {"access_token": access_token, "token_type": "bearer"} 
 
-
+# extra route
 @app.get("/users/me", response_model= User)
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user

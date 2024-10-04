@@ -1,20 +1,29 @@
 from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, OAuth2AuthorizationCodeBearer
 import uvicorn
 from datetime import timedelta, datetime
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pymongo import MongoClient, UpdateOne
 from pydantic import BaseModel, EmailStr, Field
-import os 
+import os, requests 
 from dotenv import load_dotenv
 import re
 
 load_dotenv()
 
-#* Connecting Database
+
 MAX_FAILED_ATTEMPTS = 5
-LOCKOUT_DURATION = timedelta(minutes=15)  
+LOCKOUT_DURATION = timedelta(minutes=15)
+client_id = os.getenv('GOOGLE_CLIENT_ID')
+client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+redirect_uri = "http://localhost:8000/auth/callback"
+
+# Connecting Database
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client[os.getenv('client')]
@@ -32,6 +41,66 @@ secret_key = os.getenv('secret_key')
 Algo = 'HS256'
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme_1 = OAuth2AuthorizationCodeBearer(
+    authorizationUrl="https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl="https://oauth2.googleapis.com/token"
+)
+
+# Redirecting to Google Consent 
+@app.get("/auth/google")
+async def google_login():
+    google_auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&response_type=code"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=openid email profile"
+    )
+    return RedirectResponse(url=google_auth_url)
+
+# Redirecting to google auth
+@app.get("/auth/callback")
+async def google_callback(request: Request, code: str):
+    # Exchange authorization code for tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+
+    token_response = requests.post(token_url, data=token_data)
+    token_json = token_response.json()
+    access_token = token_json.get("access_token")
+    id_token_val = token_json.get("id_token")
+
+    if not access_token or not id_token_val:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token")
+
+    try:
+        # Verify the ID token
+        id_info = id_token.verify_oauth2_token(id_token_val, google_requests.Request(), client_id)
+        google_id = id_info["sub"]
+        email = id_info["email"]
+
+        # Check if the user exists in the MongoDB database
+        user = users_collection.find_one({"email": email})
+
+        if not user:
+            return {"message": "UNSUCCESSFULL"}
+
+        if user:
+            access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            access_token = create_access_token(
+                data={"email": email}, expires_delta=access_token_expires
+            )
+        return {"message": "Success", "access": access_token}
+
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID token")
+
 
 # Pydantic model for user input validation
 class UserRegister(BaseModel):

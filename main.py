@@ -1,5 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import uvicorn
+from datetime import timedelta, datetime
+from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pymongo import MongoClient
 from pydantic import BaseModel, EmailStr, Field
@@ -12,8 +15,8 @@ load_dotenv()
 #* Connecting Database
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
-db = client['VH-Alt+Ctrl+Win']
-users_collection = db['Users']
+db = client[os.getenv('client')]
+users_collection = db[os.getenv('users_collection')]
 
 
 # FastAPI app instance
@@ -22,12 +25,61 @@ app = FastAPI()
 # Password encryption setup
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# JWT configuration
+secret_key = os.getenv('secret_key')
+Algo = 'HS256'
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
 # Pydantic model for user input validation
 class UserRegister(BaseModel):
     email: EmailStr  # Ensures the email is valid using Pydantic's built-in validation
     password: str = Field(..., min_length=8, max_length=100)  # Password length constraint
     confirm_password: str  # To confirm password
 
+class User(BaseModel):
+    email: EmailStr
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: str
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})  # Add expiration time to the token
+    encoded_jwt = jwt.encode(to_encode, secret_key, algorithm=Algo)  # Create the JWT
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, secret_key, algorithms=[Algo])  # Decode the JWT
+        email: str = payload.get("email")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+    user = users_collection.find_one({"email": token_data.email})  # Fetch user from the database
+    if user is None:
+        raise credentials_exception
+    return user
 
 def get_password_hash(password):
     return pwd_context.hash(password)
@@ -62,6 +114,24 @@ async def register_user(user: UserRegister):
 
     # 6. Return a success message
     return {"message": "User registered successfully!"}
+
+
+@app.post("/token", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = users_collection.find_one({"email": form_data.username})  # Find user by email
+    if not user or not verify_password(form_data.password, user['hashed_password']):
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"email": user['email']}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/users/me", response_model= User)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 if __name__ == "__main__":
     import uvicorn

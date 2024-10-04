@@ -4,7 +4,7 @@ import uvicorn
 from datetime import timedelta, datetime
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 from pydantic import BaseModel, EmailStr, Field
 import os 
 from dotenv import load_dotenv
@@ -13,6 +13,8 @@ import re
 load_dotenv()
 
 #* Connecting Database
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_DURATION = timedelta(minutes=15)  
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client[os.getenv('client')]
@@ -108,7 +110,10 @@ async def register_user(user: UserRegister):
     # 5. Save the user data into MongoDB
     user_data = {
         "email": user.email,
-        "hashed_password": hashed_password
+        "hashed_password": hashed_password,
+        "lockout_time": None,
+        "is_locked": False,
+        "failed_attempts": 0
     }
     users_collection.insert_one(user_data)
 
@@ -119,14 +124,44 @@ async def register_user(user: UserRegister):
 @app.post("/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = users_collection.find_one({"email": form_data.username})  # Find user by email
-    if not user or not verify_password(form_data.password, user['hashed_password']):
+    if not user :
         raise HTTPException(status_code=400, detail="Incorrect email or password")
+    
+    if user.get("is_locked"):
+        lockout_time = user.get("lockout_time", None)
+        if lockout_time and datetime.utcnow() < lockout_time + LOCKOUT_DURATION:
+            remaining_time = (lockout_time + LOCKOUT_DURATION) - datetime.utcnow()
+            raise HTTPException(status_code=403, detail=f"Account locked. Try again in {remaining_time.seconds//60} minutes.")
+        else:
+            users_collection.update_one(
+                {"email": form_data.username},
+                {"$set": {"is_locked": False, "failed_attempts": 0, "lockout_time": None}}
+            )
+    if not verify_password(form_data.password, user['hashed_password']):
+        failed_attempts = user.get("failed_attempts", 0) + 1      
+        if failed_attempts >= MAX_FAILED_ATTEMPTS:
+            users_collection.update_one(
+                {"email": form_data.username},
+                {"$set": {"is_locked": True, "lockout_time": datetime.utcnow()}}
+            )
+            raise HTTPException(status_code=403, detail="Too many failed login attempts. Account locked for 15 minutes.")
+        else:
+            users_collection.update_one(
+                {"email": form_data.username},
+                {"$set": {"failed_attempts": failed_attempts}}
+            )
+            raise HTTPException(status_code=400, detail=f"Incorrect password. {MAX_FAILED_ATTEMPTS - failed_attempts} attempts left.")
+        
+    users_collection.update_one(
+        {"email": form_data.username},
+        {"$set": {"failed_attempts": 0, "is_locked": False, "lockout_time": None}}
+    )
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"email": user['email']}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer"} 
 
 
 @app.get("/users/me", response_model= User)

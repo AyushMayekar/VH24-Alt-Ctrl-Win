@@ -209,7 +209,7 @@ async def register_user(user: UserRegister):
 
 # admin api
 @app.post("/admin")
-async def admin_access(adminemail: str = Form(...), adminpassword: str = Form(...), form_data: OAuth2PasswordRequestForm = Depends()):
+async def admin_access(adminemail: str = Form(...), adminpassword: str = Form(...)): 
     email_pattern = r'^[a-zA-Z0-9_.+-]+@vcet\.edu\.in$'
     passkey_pattern = r'^Fast.{8}API!11$' # FastabcdefghAPI!11, Fast1234abcdAPI!11, Fastx9B#$k8API!11
 
@@ -222,7 +222,7 @@ async def admin_access(adminemail: str = Form(...), adminpassword: str = Form(..
 
     # If both checks pass, return success message
     users_collection.update_one(
-                {"email": form_data.username},
+                {"email": adminemail},
                 {"$set": {"admin": True}}
             )
 

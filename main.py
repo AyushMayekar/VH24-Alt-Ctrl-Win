@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, OAuth2AuthorizationCodeBearer
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -129,6 +129,10 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: str
 
+class AdminAccessRequest(BaseModel):
+    adminemail: str
+    adminpassword: str
+
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -203,6 +207,28 @@ async def register_user(user: UserRegister):
     # 6. Return a success message
     return {"message": "User registered successfully!"}
 
+# admin api
+@app.post("/admin")
+async def admin_access(adminemail: str = Form(...), adminpassword: str = Form(...), form_data: OAuth2PasswordRequestForm = Depends()):
+    email_pattern = r'^[a-zA-Z0-9_.+-]+@vcet\.edu\.in$'
+    passkey_pattern = r'^Fast.{8}API!11$' # FastabcdefghAPI!11, Fast1234abcdAPI!11, Fastx9B#$k8API!11
+
+    if not re.match(email_pattern, adminemail):
+        raise HTTPException(status_code=400, detail="Invalid email format.")
+
+    # Validate passkey pattern
+    if not re.match(passkey_pattern, adminpassword):
+        raise HTTPException(status_code=400, detail="Invalid passkey format")
+
+    # If both checks pass, return success message
+    users_collection.update_one(
+                {"email": form_data.username},
+                {"$set": {"admin": True}}
+            )
+
+    return {
+        "detail": "Admin access granted!" 
+    }
 
 # login logic
 @app.post("/token", response_model=Token)
